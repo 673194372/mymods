@@ -106,6 +106,9 @@ public class HookEntry implements IXposedHookLoadPackage {
 
             if (DebugFlags.ENABLE_PM) {
                 PmHook.install(cl, cfg);
+                // Xposed 标记清除：与包名名单互补，抹掉 manifest 里的
+                // xposedminversion 等键，防 ApplistDetector 那类检测
+                MetaDataCleaner.install(cl);
             }
             if (DebugFlags.ENABLE_AM) {
                 AmHook.install(cl, cfg);
