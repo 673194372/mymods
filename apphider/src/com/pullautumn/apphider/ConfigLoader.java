@@ -6,19 +6,20 @@ import java.util.Set;
 import de.robv.android.xposed.XposedBridge;
 
 /**
- * 配置加载器。
+ * 配置加载器 —— 黑名单模式。
  *
- * 优先级：
- *   1) 编译进 dex 的 WhitelistData（从 HMA JSON 自动生成）
- *   2) 内置默认黑名单 Config.DEFAULT_HIDDEN
+ * 只隐藏 Config.HIDDEN 里明确列出的包名，其余全部放行。
  *
- * 为什么不用读文件：
- *   Android 11+ 分区存储下，目标 App 进程读不到
- *   模块自己 /sdcard/Android/data/ 下的文件（Permission denied）。
- *   所以配置必须编译进 dex。
+ * 为什么不用白名单：
+ *   白名单是「除列表外全藏」，需要列表覆盖目标应用的全部系统依赖，
+ *   否则一旦漏掉 WebView provider、Provider、输入法之类，
+ *   目标应用会直接崩溃。实际维护成本极高。
  *
- * 要改配置：改 隐藏应用列表白名单配置.json → 重新跑 _gen_whitelist.py
- *          → 提交 → 重新构建。
+ *   黑名单只藏明确要藏的东西，不会误伤，稳定性优先。
+ *
+ * 配置为何编译进 dex：
+ *   Android 11+ 分区存储下，目标应用进程读不到模块自己
+ *   /sdcard/Android/data/ 下的文件，只能编译进 APK。
  */
 final class ConfigLoader {
 
@@ -31,7 +32,7 @@ final class ConfigLoader {
         final Set<String> hidden = new LinkedHashSet<String>();
         final Set<String> visible = new LinkedHashSet<String>();
         boolean isWhitelist = false;
-        String source = "内置默认";
+        String source = "内置";
 
         boolean isEmpty() {
             return hidden.isEmpty() && visible.isEmpty();
@@ -39,50 +40,18 @@ final class ConfigLoader {
     }
 
     static Result load() {
-        Result r = loadFromCompiledData();
-        if (r != null && !r.isEmpty()) {
-            return r;
-        }
+        Result r = new Result();
+        r.isWhitelist = false;
+        r.source = "编译内置黑名单";
 
-        Result def = new Result();
-        for (String p : Config.DEFAULT_HIDDEN) {
-            def.hidden.add(p);
-        }
-        def.source = "内置默认黑名单";
-        XposedBridge.log(TAG + " 使用内置默认列表，共 " + def.hidden.size() + " 项");
-        return def;
-    }
-
-    /** 从编译进 dex 的数据加载 */
-    private static Result loadFromCompiledData() {
-        try {
-            String[] pkgs = WhitelistData.PACKAGES;
-            if (pkgs == null || pkgs.length == 0) {
-                return null;
+        for (String p : Config.HIDDEN) {
+            if (p == null || p.length() == 0) {
+                continue;
             }
-
-            Result r = new Result();
-            r.isWhitelist = WhitelistData.IS_WHITELIST;
-            r.source = "编译内置 (HMA 白名单)";
-
-            for (String p : pkgs) {
-                if (p == null || p.length() == 0) {
-                    continue;
-                }
-                if (r.isWhitelist) {
-                    r.visible.add(p);
-                } else {
-                    r.hidden.add(p);
-                }
-            }
-
-            XposedBridge.log(TAG + " 已加载编译内置配置: 模式="
-                    + (r.isWhitelist ? "白名单" : "黑名单")
-                    + ", 条目=" + pkgs.length);
-            return r;
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + " 读取编译数据失败: " + t.getMessage());
-            return null;
+            r.hidden.add(p);
         }
+
+        XposedBridge.log(TAG + " 黑名单模式，共 " + r.hidden.size() + " 项");
+        return r;
     }
 }
