@@ -217,9 +217,14 @@ final class PmHook {
                 List<ResolveInfo> src = (List<ResolveInfo>) r;
                 List<ResolveInfo> out = new ArrayList<ResolveInfo>(src.size());
                 int removed = 0;
+                int cleaned = 0;
                 for (ResolveInfo ri : src) {
                     if (ri == null) {
                         continue;
+                    }
+                    // 先抹掉 Xposed 标记（与包名无关，必做）
+                    if (cleanResolveMeta(ri)) {
+                        cleaned++;
                     }
                     String pkg = resolvePkg(ri);
                     if (pkg != null && shouldHideResolve(ri, cfg)) {
@@ -228,8 +233,12 @@ final class PmHook {
                     }
                     out.add(ri);
                 }
-                if (removed > 0) {
+                // 只要清理过 metaData 也要设回结果
+                if (removed > 0 || cleaned > 0) {
                     param.setResult(out);
+                }
+                if (cleaned > 0) {
+                    XposedBridge.log(TAG + " queryIntent 清除 " + cleaned + " 个 Xposed 标记");
                 }
             }
         };
@@ -264,6 +273,28 @@ final class PmHook {
             return ri.providerInfo.packageName;
         }
         return null;
+    }
+
+    /**
+     * 从 ResolveInfo 上抹掉 Xposed 模块标记。
+     *
+     * ApplistDetector 的检测逻辑：
+     *   pm.queryIntentActivities(Intent(ACTION_MAIN), GET_META_DATA)
+     *   → 逐个看 activityInfo.applicationInfo.metaData["xposedminversion"]
+     *   → 非 null 就算 FOUND
+     *
+     * 所以必须把 metaData 里的键删掉，而不是只看包名。
+     */
+    private static boolean cleanResolveMeta(ResolveInfo ri) {
+        ApplicationInfo ai = null;
+        if (ri.activityInfo != null) {
+            ai = ri.activityInfo.applicationInfo;
+        } else if (ri.serviceInfo != null) {
+            ai = ri.serviceInfo.applicationInfo;
+        } else if (ri.providerInfo != null) {
+            ai = ri.providerInfo.applicationInfo;
+        }
+        return MetaDataCleaner.cleanApplicationInfo(ai);
     }
 
     private static boolean shouldHideResolve(ResolveInfo ri, ConfigLoader.Result cfg) {
