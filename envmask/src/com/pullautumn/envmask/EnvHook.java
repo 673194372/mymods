@@ -68,20 +68,27 @@ final class EnvHook {
         XC_MethodHook fileGuard = new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
-                if (!(param.thisObject instanceof File)) {
+                if (!Reentry.enterFileCheck()) {
                     return;
                 }
-                String path;
                 try {
-                    path = ((File) param.thisObject).getAbsolutePath();
-                } catch (Throwable t) {
-                    return;
-                }
-                for (String p : EMU_PATHS) {
-                    if (path.equals(p) || path.startsWith(p)) {
-                        param.setResult(Boolean.FALSE);
+                    if (!(param.thisObject instanceof File)) {
                         return;
                     }
+                    String path;
+                    try {
+                        path = ((File) param.thisObject).getAbsolutePath();
+                    } catch (Throwable t) {
+                        return;
+                    }
+                    for (String p : EMU_PATHS) {
+                        if (path.equals(p) || path.startsWith(p)) {
+                            param.setResult(Boolean.FALSE);
+                            return;
+                        }
+                    }
+                } finally {
+                    Reentry.exitFileCheck();
                 }
             }
         };
@@ -90,34 +97,7 @@ final class EnvHook {
         } catch (Throwable ignored) {
         }
 
-        // ② Build 字段伪造（FINGERPRINT / MODEL / MANUFACTURER / HARDWARE 等）
-        // Build 的静态 final 字段在类初始化后无法直接改，
-        // 用 Field.get 拦截（RootHook 也 hook 了 Field.get，这里补充模拟器相关）
-        try {
-            XC_MethodHook fieldGuard = new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    if (!(param.thisObject instanceof java.lang.reflect.Field)) {
-                        return;
-                    }
-                    java.lang.reflect.Field f = (java.lang.reflect.Field) param.thisObject;
-                    if (!f.getDeclaringClass().getName().equals("android.os.Build")) {
-                        return;
-                    }
-                    String name = f.getName();
-                    Object real = param.getResult();
-                    if (!(real instanceof String)) {
-                        return;
-                    }
-                    String v = (String) real;
-                    if (fakeBuild(name, v) != null) {
-                        param.setResult(fakeBuild(name, v));
-                    }
-                }
-            };
-            XposedHelpers.findAndHookMethod(java.lang.reflect.Field.class, "get", Object.class, fieldGuard);
-        } catch (Throwable ignored) {
-        }
+        // ② Build 字段伪造已移至 ReflectionHook 统一处理
 
         // ③ SystemProperties 的 qemu / hardware 属性
         try {
