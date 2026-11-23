@@ -74,16 +74,22 @@ final class HookTraceHook {
         XC_MethodHook guard = new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
-                String name = null;
-                if (param.args != null && param.args.length > 0) {
-                    Object a0 = param.args[0];
-                    if (a0 instanceof String) {
-                        name = (String) a0;
-                    }
+                if (!Reentry.enterClassForName()) {
+                    return;
                 }
-                if (name != null && isHiddenClass(name)) {
-                    param.setThrowable(new ClassNotFoundException(name));
-                    XposedBridge.log(TAG + " Class.forName(" + name + ") → ClassNotFound");
+                try {
+                    String name = null;
+                    if (param.args != null && param.args.length > 0) {
+                        Object a0 = param.args[0];
+                        if (a0 instanceof String) {
+                            name = (String) a0;
+                        }
+                    }
+                    if (name != null && isHiddenClass(name)) {
+                        param.setThrowable(new ClassNotFoundException(name));
+                    }
+                } finally {
+                    Reentry.exitClassForName();
                 }
             }
         };
