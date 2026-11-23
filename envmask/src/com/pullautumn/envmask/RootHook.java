@@ -67,7 +67,6 @@ final class RootHook {
         }
         hookFileExists(cl);
         hookRuntimeExec(cl);
-        hookBuildFields();
         XposedBridge.log(TAG + " Root 检测钩子已安装");
     }
 
@@ -77,18 +76,24 @@ final class RootHook {
         XC_MethodHook guard = new XC_MethodHook() {
             @Override
             protected void beforeHookedMethod(MethodHookParam param) {
-                if (!(param.thisObject instanceof File)) {
+                if (!Reentry.enterFileCheck()) {
                     return;
                 }
-                String path;
                 try {
-                    path = ((File) param.thisObject).getAbsolutePath();
-                } catch (Throwable t) {
-                    return;
-                }
-                if (isRootPath(path)) {
-                    param.setResult(Boolean.FALSE);
-                    XposedBridge.log(TAG + " 文件 exists() " + path + " → false");
+                    if (!(param.thisObject instanceof File)) {
+                        return;
+                    }
+                    String path;
+                    try {
+                        path = ((File) param.thisObject).getAbsolutePath();
+                    } catch (Throwable t) {
+                        return;
+                    }
+                    if (isRootPath(path)) {
+                        param.setResult(Boolean.FALSE);
+                    }
+                } finally {
+                    Reentry.exitFileCheck();
                 }
             }
         };
@@ -241,43 +246,4 @@ final class RootHook {
         return false;
     }
 
-    // ==================== Build.TAGS ====================
-
-    /**
-     * 有些检测读 Build.TAGS 里有没有 "test-keys"。
-     * Build 的静态字段在类初始化后就是 final 值，改字段需要反射绕过，
-     * 这里改用 hook 的方式不好做（字段不是方法），
-     * 所以改为在 SystemProperties 层拦截 ro.build.tags（已在 DevOptHook 里做）。
-     *
-     * 这里额外处理一个常见写法：Build.class.getDeclaredField("TAGS")
-     * 通过反射读取的，我们 hook Field.get()。
-     */
-    private static void hookBuildFields() {
-        try {
-            XC_MethodHook fieldGuard = new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    if (!(param.thisObject instanceof java.lang.reflect.Field)) {
-                        return;
-                    }
-                    java.lang.reflect.Field f = (java.lang.reflect.Field) param.thisObject;
-                    String name = f.getName();
-                    if ("TAGS".equals(name)) {
-                        Object real = param.getResult();
-                        if (real instanceof String && ((String) real).contains("test-keys")) {
-                            param.setResult("release-keys");
-                        }
-                    } else if ("DEBUGGABLE".equals(name)) {
-                        Object real = param.getResult();
-                        if (real instanceof Integer && ((Integer) real) != 0) {
-                            param.setResult(0);
-                        }
-                    }
-                }
-            };
-            XposedHelpers.findAndHookMethod(java.lang.reflect.Field.class, "get", Object.class, fieldGuard);
-            XposedHelpers.findAndHookMethod(java.lang.reflect.Field.class, "get", fieldGuard);
-        } catch (Throwable ignored) {
-        }
-    }
 }
