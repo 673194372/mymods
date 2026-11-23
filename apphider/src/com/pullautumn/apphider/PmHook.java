@@ -6,7 +6,6 @@ import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 
 import java.util.ArrayList;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
 
@@ -17,23 +16,26 @@ import de.robv.android.xposed.XposedHelpers;
 /**
  * PackageManager 层拦截。
  *
- * 支持两种模式（由 HMA 配置的 isWhitelist 决定）：
+ * 两条铁律（违反会导致目标应用崩溃）：
  *
- *   黑名单模式 (isWhitelist=false)
- *     hidden 集合里的包名 → 从返回结果中删除
- *     "隐藏这几个"
+ *   一、绝不原地修改 PackageManager 返回的 List。
+ *       框架内部可能缓存这些 List 实例。原地 remove 会让调用方
+ *       两次拿到的内容不一致，进而触发 WebView 之类的重复初始化：
+ *         IllegalStateException: Already registered a list of actions
+ *       正确做法：构造新 List，用 setResult 换掉返回值。
  *
- *   白名单模式 (isWhitelist=true)
- *     visible 集合里的包名 → 保留
- *     其他 → 全部从返回结果中删除
- *     "只允许这几个被看见"
- *
- * 白名单模式完全可行，因为我们 hook 的是「返回列表」这个动作本身 ——
- * 列表就在手里，按规则过滤即可，不需要预先知道设备装了什么。
+ *   二、系统应用永不隐藏。
+ *       白名单的语义是「我另外装了什么」不该被发现，
+ *       系统应用本来就该存在，隐藏它们只会破坏依赖关系。
+ *       判定依据：ApplicationInfo.FLAG_SYSTEM / FLAG_UPDATED_SYSTEM_APP。
  */
 final class PmHook {
 
     private static final String TAG = "[AppHider/PM]";
+
+    /** 系统应用标志 */
+    private static final int SYSTEM_FLAGS =
+            ApplicationInfo.FLAG_SYSTEM | ApplicationInfo.FLAG_UPDATED_SYSTEM_APP;
 
     private PmHook() {
     }
@@ -56,7 +58,8 @@ final class PmHook {
         hookGetInstalledModules(cl, cfg);
     }
 
-    // ---------- getInstalledPackages ----------
+    // ==================== getInstalledPackages ====================
+
     private static void hookGetInstalledPackages(ClassLoader cl, final ConfigLoader.Result cfg) {
         XC_MethodHook filter = new XC_MethodHook() {
             @Override
@@ -66,38 +69,44 @@ final class PmHook {
                 if (!(r instanceof List)) {
                     return;
                 }
-                List<PackageInfo> list = (List<PackageInfo>) r;
-                int before = list.size();
-                Iterator<PackageInfo> it = list.iterator();
-                while (it.hasNext()) {
-                    PackageInfo pi = it.next();
-                    if (pi != null && shouldHide(pi.packageName, cfg)) {
-                        it.remove();
+                List<PackageInfo> src = (List<PackageInfo>) r;
+                // 构造新 List，绝对不动 src
+                List<PackageInfo> out = new ArrayList<PackageInfo>(src.size());
+                int removed = 0;
+                for (PackageInfo pi : src) {
+                    if (pi == null) {
+                        continue;
                     }
+                    if (shouldHidePackage(pi, cfg)) {
+                        removed++;
+                        continue;
+                    }
+                    out.add(pi);
                 }
-                if (before != list.size()) {
-                    XposedBridge.log(TAG + " getInstalledPackages: " + before + " → " + list.size());
+                if (removed > 0) {
+                    param.setResult(out);
+                    XposedBridge.log(TAG + " getInstalledPackages: "
+                            + src.size() + " → " + out.size());
                 }
             }
         };
 
-        for (String sig : new String[]{"int", "int,int"}) {
-            try {
-                if ("int".equals(sig)) {
-                    XposedHelpers.findAndHookMethod(
-                            "android.app.ApplicationPackageManager", cl,
-                            "getInstalledPackages", int.class, filter);
-                } else {
-                    XposedHelpers.findAndHookMethod(
-                            "android.app.ApplicationPackageManager", cl,
-                            "getInstalledPackages", int.class, int.class, filter);
-                }
-            } catch (Throwable ignored) {
-            }
+        try {
+            XposedHelpers.findAndHookMethod(
+                    "android.app.ApplicationPackageManager", cl,
+                    "getInstalledPackages", int.class, filter);
+        } catch (Throwable ignored) {
+        }
+        try {
+            XposedHelpers.findAndHookMethod(
+                    "android.app.ApplicationPackageManager", cl,
+                    "getInstalledPackages", int.class, int.class, filter);
+        } catch (Throwable ignored) {
         }
     }
 
-    // ---------- getInstalledApplications ----------
+    // ==================== getInstalledApplications ====================
+
     private static void hookGetInstalledApplications(ClassLoader cl, final ConfigLoader.Result cfg) {
         XC_MethodHook filter = new XC_MethodHook() {
             @Override
@@ -107,17 +116,23 @@ final class PmHook {
                 if (!(r instanceof List)) {
                     return;
                 }
-                List<ApplicationInfo> list = (List<ApplicationInfo>) r;
-                int before = list.size();
-                Iterator<ApplicationInfo> it = list.iterator();
-                while (it.hasNext()) {
-                    ApplicationInfo ai = it.next();
-                    if (ai != null && shouldHide(ai.packageName, cfg)) {
-                        it.remove();
+                List<ApplicationInfo> src = (List<ApplicationInfo>) r;
+                List<ApplicationInfo> out = new ArrayList<ApplicationInfo>(src.size());
+                int removed = 0;
+                for (ApplicationInfo ai : src) {
+                    if (ai == null) {
+                        continue;
                     }
+                    if (shouldHideAppInfo(ai, cfg)) {
+                        removed++;
+                        continue;
+                    }
+                    out.add(ai);
                 }
-                if (before != list.size()) {
-                    XposedBridge.log(TAG + " getInstalledApplications: " + before + " → " + list.size());
+                if (removed > 0) {
+                    param.setResult(out);
+                    XposedBridge.log(TAG + " getInstalledApplications: "
+                            + src.size() + " → " + out.size());
                 }
             }
         };
@@ -136,7 +151,8 @@ final class PmHook {
         }
     }
 
-    // ---------- getPackageInfo / getApplicationInfo ----------
+    // ==================== getPackageInfo / getApplicationInfo ====================
+
     private static void hookGetPackageInfo(ClassLoader cl, final ConfigLoader.Result cfg) {
         XC_MethodHook guard = new XC_MethodHook() {
             @Override
@@ -187,7 +203,8 @@ final class PmHook {
         }
     }
 
-    // ---------- queryIntent* ----------
+    // ==================== queryIntent* ====================
+
     private static void hookQueryIntent(ClassLoader cl, final ConfigLoader.Result cfg) {
         XC_MethodHook filter = new XC_MethodHook() {
             @Override
@@ -197,24 +214,22 @@ final class PmHook {
                 if (!(r instanceof List)) {
                     return;
                 }
-                List<ResolveInfo> list = (List<ResolveInfo>) r;
-                Iterator<ResolveInfo> it = list.iterator();
-                while (it.hasNext()) {
-                    ResolveInfo ri = it.next();
+                List<ResolveInfo> src = (List<ResolveInfo>) r;
+                List<ResolveInfo> out = new ArrayList<ResolveInfo>(src.size());
+                int removed = 0;
+                for (ResolveInfo ri : src) {
                     if (ri == null) {
                         continue;
                     }
-                    String pkg = null;
-                    if (ri.activityInfo != null) {
-                        pkg = ri.activityInfo.packageName;
-                    } else if (ri.serviceInfo != null) {
-                        pkg = ri.serviceInfo.packageName;
-                    } else if (ri.providerInfo != null) {
-                        pkg = ri.providerInfo.packageName;
+                    String pkg = resolvePkg(ri);
+                    if (pkg != null && shouldHideResolve(ri, cfg)) {
+                        removed++;
+                        continue;
                     }
-                    if (pkg != null && shouldHide(pkg, cfg)) {
-                        it.remove();
-                    }
+                    out.add(ri);
+                }
+                if (removed > 0) {
+                    param.setResult(out);
                 }
             }
         };
@@ -238,7 +253,41 @@ final class PmHook {
         }
     }
 
-    // ---------- getPackagesForUid ----------
+    private static String resolvePkg(ResolveInfo ri) {
+        if (ri.activityInfo != null) {
+            return ri.activityInfo.packageName;
+        }
+        if (ri.serviceInfo != null) {
+            return ri.serviceInfo.packageName;
+        }
+        if (ri.providerInfo != null) {
+            return ri.providerInfo.packageName;
+        }
+        return null;
+    }
+
+    private static boolean shouldHideResolve(ResolveInfo ri, ConfigLoader.Result cfg) {
+        String pkg = resolvePkg(ri);
+        if (pkg == null) {
+            return false;
+        }
+        // 系统应用放行
+        ApplicationInfo ai = null;
+        if (ri.activityInfo != null) {
+            ai = ri.activityInfo.applicationInfo;
+        } else if (ri.serviceInfo != null) {
+            ai = ri.serviceInfo.applicationInfo;
+        } else if (ri.providerInfo != null) {
+            ai = ri.providerInfo.applicationInfo;
+        }
+        if (ai != null && isSystemApp(ai)) {
+            return false;
+        }
+        return shouldHide(pkg, cfg);
+    }
+
+    // ==================== getPackagesForUid ====================
+
     private static void hookGetPackagesForUid(ClassLoader cl, final ConfigLoader.Result cfg) {
         try {
             XposedHelpers.findAndHookMethod(
@@ -252,7 +301,7 @@ final class PmHook {
                                 return;
                             }
                             String[] arr = (String[]) r;
-                            List<String> keep = new ArrayList<>();
+                            List<String> keep = new ArrayList<String>(arr.length);
                             for (String s : arr) {
                                 if (!shouldHide(s, cfg)) {
                                     keep.add(s);
@@ -267,7 +316,8 @@ final class PmHook {
         }
     }
 
-    // ---------- Android 12+ 模块 ----------
+    // ==================== Android 12+ 模块 ====================
+
     private static void hookGetInstalledModules(ClassLoader cl, final ConfigLoader.Result cfg) {
         try {
             XposedHelpers.findAndHookMethod(
@@ -281,17 +331,22 @@ final class PmHook {
                             if (!(r instanceof List)) {
                                 return;
                             }
-                            List<Object> list = (List<Object>) r;
-                            Iterator<Object> it = list.iterator();
-                            while (it.hasNext()) {
-                                Object mi = it.next();
+                            List<Object> src = (List<Object>) r;
+                            List<Object> out = new ArrayList<Object>(src.size());
+                            for (Object mi : src) {
+                                boolean hide = false;
                                 try {
-                                    String pkg = (String) XposedHelpers.getObjectField(mi, "packageName");
-                                    if (shouldHide(pkg, cfg)) {
-                                        it.remove();
-                                    }
+                                    String pkg = (String) XposedHelpers.getObjectField(
+                                            mi, "packageName");
+                                    hide = shouldHide(pkg, cfg);
                                 } catch (Throwable ignored) {
                                 }
+                                if (!hide) {
+                                    out.add(mi);
+                                }
+                            }
+                            if (out.size() != src.size()) {
+                                param.setResult(out);
                             }
                         }
                     });
@@ -301,32 +356,54 @@ final class PmHook {
 
     // ==================== 核心判定 ====================
 
+    /** 系统应用判定 */
+    private static boolean isSystemApp(ApplicationInfo ai) {
+        if (ai == null) {
+            return false;
+        }
+        return (ai.flags & SYSTEM_FLAGS) != 0;
+    }
+
+    /** 针对 PackageInfo 的判定（含系统应用放行） */
+    private static boolean shouldHidePackage(PackageInfo pi, ConfigLoader.Result cfg) {
+        if (pi == null) {
+            return false;
+        }
+        if (isSystemApp(pi.applicationInfo)) {
+            return false;
+        }
+        return shouldHide(pi.packageName, cfg);
+    }
+
+    /** 针对 ApplicationInfo 的判定 */
+    private static boolean shouldHideAppInfo(ApplicationInfo ai, ConfigLoader.Result cfg) {
+        if (ai == null) {
+            return false;
+        }
+        if (isSystemApp(ai)) {
+            return false;
+        }
+        return shouldHide(ai.packageName, cfg);
+    }
+
     /**
-     * 统一的"是否应该隐藏"判定。两种模式的区别只在这里。
+     * 包名级判定。
      *
-     * 黑名单：在 hidden 里 → 隐藏
-     * 白名单：不在 visible 里 → 隐藏
-     *
-     * 前置保护：系统必需包（WebView 提供者、核心 Provider、输入法等）
-     * 永远返回 false，否则目标应用会直接崩溃。
+     * 前置保护：
+     *   1. 系统必需包（WebView 提供者、核心 Provider、输入法等）永不隐藏
+     *   2. 白名单模式只过滤非系统应用（调用方需先判 FLAG_SYSTEM）
      */
     static boolean shouldHide(String pkg, ConfigLoader.Result cfg) {
         if (pkg == null || cfg == null) {
             return false;
         }
-
-        // 系统必需包永不隐藏
         if (CriticalPkgs.isAlwaysVisible(pkg)) {
             return false;
         }
-
         if (cfg.isWhitelist) {
-            // 白名单模式：只保留 visible 里的
             return !matchAny(pkg, cfg.visible);
-        } else {
-            // 黑名单模式：命中 hidden 的才隐藏
-            return matchAny(pkg, cfg.hidden);
         }
+        return matchAny(pkg, cfg.hidden);
     }
 
     /** 支持精确匹配 + "com.foo.*" 通配 */
