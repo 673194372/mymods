@@ -58,7 +58,6 @@ final class DevOptExtraHook {
         hookIsDeveloperOptionsEnabled(cl);
         hookContentResolverQuery(cl);
         hookContentResolverCall(cl);
-        hookBuildType(cl);
         hookGetStringDirect(cl);
         XposedBridge.log(TAG + " 开发者选项补强钩子已安装");
     }
@@ -290,46 +289,7 @@ final class DevOptExtraHook {
         }
     }
 
-    // ==================== ④ Build.TYPE ====================
-
-    /**
-     * 只拦 ro.build.type 属性不够，还需拦 Build.TYPE 字段本身。
-     *
-     * Build.TYPE 是 static final String，编译进类常量池，
-     * 运行时改字段不一定有效（内联优化）。
-     * 这里 hook Field.get 兜底。
-     */
-    private static void hookBuildType(ClassLoader cl) {
-        try {
-            XC_MethodHook fieldHook = new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    if (!(param.thisObject instanceof java.lang.reflect.Field)) {
-                        return;
-                    }
-                    java.lang.reflect.Field f = (java.lang.reflect.Field) param.thisObject;
-                    if (!"android.os.Build".equals(f.getDeclaringClass().getName())) {
-                        return;
-                    }
-                    String name = f.getName();
-                    Object real = param.getResult();
-                    if ("TYPE".equals(name) && "userdebug".equals(real)) {
-                        param.setResult("user");
-                    } else if ("TAGS".equals(name) && real instanceof String
-                            && ((String) real).contains("test-keys")) {
-                        param.setResult("release-keys");
-                    } else if ("DEBUGGABLE".equals(name) && real instanceof Integer
-                            && ((Integer) real) != 0) {
-                        param.setResult(0);
-                    }
-                }
-            };
-            XposedHelpers.findAndHookMethod(java.lang.reflect.Field.class, "get", Object.class, fieldHook);
-        } catch (Throwable ignored) {
-        }
-
-        // Build.TYPE 也可能通过 Build.getSerial 这类方式被读，但那不是重点
-    }
+    // ④ Build.TYPE 已移至 ReflectionHook 统一处理
 
     // ==================== ⑤ getString 兜底 ====================
 
