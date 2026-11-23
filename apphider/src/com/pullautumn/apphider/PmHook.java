@@ -306,9 +306,17 @@ final class PmHook {
      *
      * 黑名单：在 hidden 里 → 隐藏
      * 白名单：不在 visible 里 → 隐藏
+     *
+     * 前置保护：系统必需包（WebView 提供者、核心 Provider、输入法等）
+     * 永远返回 false，否则目标应用会直接崩溃。
      */
     static boolean shouldHide(String pkg, ConfigLoader.Result cfg) {
         if (pkg == null || cfg == null) {
+            return false;
+        }
+
+        // 系统必需包永不隐藏
+        if (CriticalPkgs.isAlwaysVisible(pkg)) {
             return false;
         }
 
